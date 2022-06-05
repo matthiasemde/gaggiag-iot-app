@@ -1,26 +1,35 @@
 package de.matthiasemde.gaggiaiot
 
+import android.content.Context
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.VibratorManager
 import android.util.Log
 import android.widget.Button
 import android.widget.TextView
+import androidx.appcompat.widget.SwitchCompat
+import androidx.core.content.ContentProviderCompat.requireContext
 import androidx.lifecycle.lifecycleScope
 import com.fasterxml.jackson.databind.ObjectMapper
+import kotlinx.coroutines.NonCancellable.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
 import java.io.IOException
-import kotlin.math.round
+import java.net.SocketTimeoutException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resumeWithException
 
 data class GaggiaState (
-    val temp: Double
+    val temp: Double?
 )
 
 data class Temperatures (
-    val brew: Double,
-    val steam: Double,
+    var brew: Double,
+    var steam: Double,
 )
 
 data class Pressures (
@@ -34,9 +43,11 @@ data class Configuration (
     val preinfusionTime: Int,
 )
 
-private val client = OkHttpClient()
+private val client = OkHttpClient.Builder()
+    .connectTimeout(2, TimeUnit.SECONDS)
+    .build()
 
-suspend fun fetchSensorValues(): GaggiaState {
+suspend fun fetchSensorValues(): GaggiaState? {
     val request = Request.Builder()
         .url("http://gaggia-iot/info/sensors")
         .build()
@@ -44,7 +55,8 @@ suspend fun fetchSensorValues(): GaggiaState {
     return suspendCancellableCoroutine { cancellableContinuation ->
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                e.printStackTrace()
+                Log.d("MainActivity", "Failed to fetch sensor values")
+                cancellableContinuation.resumeWith(Result.success(null))
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -62,7 +74,7 @@ suspend fun fetchSensorValues(): GaggiaState {
     }
 }
 
-suspend fun fetchConfiguration(): Configuration {
+suspend fun fetchConfiguration(): Configuration? {
     val request = Request.Builder()
         .url("http://gaggia-iot/configuration")
         .build()
@@ -70,7 +82,7 @@ suspend fun fetchConfiguration(): Configuration {
     return suspendCancellableCoroutine { cancellableContinuation ->
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                e.printStackTrace()
+                cancellableContinuation.resumeWith(Result.success(null))
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -97,10 +109,10 @@ suspend fun fetchConfiguration(): Configuration {
 fun postTempTarget(newTarget: Double, store: String? = null) {
     val request = Request.Builder().apply {
         if (store.isNullOrEmpty()) {
-            url("http://gaggia-iot/direct-control/temperature")
+            url("http://gaggia-iot/direct-control")
             post(
                 FormBody.Builder()
-                    .add("newTarget", newTarget.toString())
+                    .add("temperature", newTarget.toString())
                     .build()
             )
         } else {
@@ -115,6 +127,7 @@ fun postTempTarget(newTarget: Double, store: String? = null) {
 
     client.newCall(request).enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) {
+
             e.printStackTrace()
         }
 
@@ -126,56 +139,150 @@ fun postTempTarget(newTarget: Double, store: String? = null) {
     })
 }
 
+fun postSolenoidState(newState: Boolean) {
+    val request = Request.Builder()
+        .url("http://gaggia-iot/direct-control")
+        .post(
+            FormBody.Builder()
+                .add("solenoid", if(newState) "open" else "close")
+                .build()
+        )
+        .build()
+
+    client.newCall(request).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) {
+            e.printStackTrace()
+        }
+
+        override fun onResponse(call: Call, response: Response) {
+            response.use {
+                if (!response.isSuccessful) throw IOException("Unexpected code $response")
+            }
+        }
+    })
+}
 
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        val solenoidControlView = findViewById<SwitchCompat>(R.id.solenoid_control)
+
+        solenoidControlView.setOnCheckedChangeListener { _, isChecked ->
+            postSolenoidState(isChecked)
+        }
+
         val realTempView = findViewById<TextView>(R.id.realTemp)
+
+        var showRealTemp = 0
 
         lifecycleScope.launch {
             while(true) {
-                val state = fetchSensorValues()
+                val state = try {
+                    fetchSensorValues()
+                } catch (e: Exception) {
+                    Log.d("MainActivity", "Exception caughht")
+                    null
+                }
                 Log.d("state", state.toString())
-                realTempView.text = "${round(state.temp)}°C"
+                if(showRealTemp == 0) {
+                    realTempView.text = state?.temp?.let { String.format("%.1f°C", it) } ?: "--.-°C"
+                } else {
+                    showRealTemp -= 1
+                }
                 delay(1000)
             }
         }
 
-        var tempTarget = 25.0
-        val tempTargetView = findViewById<TextView>(R.id.targetTemp)
+        var tempTarget: Double? = 25.0
 
+        var config: Configuration? = null
 
         lifecycleScope.launch {
-            val config = fetchConfiguration()
+            config = fetchConfiguration()
             Log.d("config", config.toString())
-            tempTarget = config.temps.brew
-            tempTargetView.text = "${round(tempTarget)}°C"
+            tempTarget = config?.temps?.brew
         }
 
         val tempPlusOne = findViewById<Button>(R.id.temperaturePlusOne)
         val tempMinusOne = findViewById<Button>(R.id.temperatureMinusOne)
 
-        tempPlusOne.setOnClickListener {
-            tempTarget += 1
-            tempTargetView.text = "${round(tempTarget)}°C"
-            postTempTarget(tempTarget)
-        }
-        tempMinusOne.setOnClickListener {
-            tempTarget -= 1
-            tempTargetView.text = "${round(tempTarget)}°C"
-            postTempTarget(tempTarget)
+        fun showTargetTemp() {
+            showRealTemp = 1
+            realTempView.text = String.format("%.1f°C", tempTarget)
         }
 
-        val storeAsSteam = findViewById<Button>(R.id.storeAsSteam)
-        val storeAsBrew = findViewById<Button>(R.id.storeAsBrew)
-
-        storeAsSteam.setOnClickListener {
-            postTempTarget(tempTarget, "steam")
+        tempPlusOne.setOnClickListener { _ ->
+            lifecycleScope.launch {
+                if(tempTarget == null) {
+                    config?:fetchConfiguration()?.temps?.brew?.let { tempTarget = it }
+                }
+                tempTarget?.let {
+                    tempTarget = it.plus(1.0)
+                    postTempTarget(it)
+                }
+                showTargetTemp()
+            }
         }
-        storeAsBrew.setOnClickListener {
-            postTempTarget(tempTarget, "brew")
+        tempMinusOne.setOnClickListener { _ ->
+            lifecycleScope.launch {
+                if (tempTarget == null) {
+                    config ?: fetchConfiguration()?.temps?.brew?.let { tempTarget = it }
+                }
+                tempTarget?.let {
+                    tempTarget = it.minus(1.0)
+                    postTempTarget(it)
+                }
+                showTargetTemp()
+            }
+        }
+
+        val brewTempButtonView = findViewById<Button>(R.id.brewTemp)
+        val steamTempButtonView = findViewById<Button>(R.id.steamTemp)
+
+        val vibrationManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+
+        brewTempButtonView.setOnClickListener {
+            config?.temps?.brew?.let {
+                tempTarget = it
+                postTempTarget(it)
+            }
+            showTargetTemp()
+        }
+        brewTempButtonView.setOnLongClickListener { _ ->
+            vibrationManager.defaultVibrator.apply {
+                cancel()
+                vibrate(
+                    VibrationEffect.createOneShot(200,100)
+                )
+            }
+            tempTarget?.let {
+                postTempTarget(it, "brew")
+                config?.temps?.brew = it
+            }
+            true
+        }
+        steamTempButtonView.setOnClickListener {
+            config?.temps?.steam?.let {
+                Log.d("steamTemp", it.toString())
+                tempTarget = it
+                postTempTarget(it)
+            }
+            showTargetTemp()
+        }
+        steamTempButtonView.setOnLongClickListener { _ ->
+            vibrationManager.defaultVibrator.apply {
+                cancel()
+                vibrate(
+                    VibrationEffect.createOneShot(200,100)
+                )
+            }
+            tempTarget?.let {
+                postTempTarget(it, "steam")
+                config?.temps?.steam = it
+            }
+            true
         }
     }
 }

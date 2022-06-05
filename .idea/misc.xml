@@ -3,7 +3,11 @@
   <component name="DesignSurface">
     <option name="filePathToZoomLevelMap">
       <map>
-        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/layout/activity_main.xml" value="0.4466666666666667" />
+        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/drawable/button_background.xml" value="0.282" />
+        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/drawable/divider.xml" value="3.3333333333333335" />
+        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/drawable/pill_left_half.xml" value="0.2245" />
+        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/drawable/pill_right_hlaf.xml" value="0.27" />
+        <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/layout/activity_main.xml" value="0.6" />
         <entry key="..\:/myData/Documents/code/gaggia/app/app/src/main/res/xml/network_security_config.xml" value="0.26979166666666665" />
       </map>
     </option>
